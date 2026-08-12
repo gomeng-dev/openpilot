@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import jwt
-from Crypto.PublicKey import RSA
+from Crypto.PublicKey import ECC, RSA
 
 
 @contextmanager
@@ -88,7 +88,7 @@ def test_pairing_client_contract(tmp_path, monkeypatch):
       FakeResponse(204),
     ]
   )
-  client = module.CarrotLinkClient("https://dashboard.example", tmp_path, FakeParams(), session)
+  client = module.CarrotLinkClient("https://Dashboard.Example:443", tmp_path, FakeParams(), session)
 
   result = client.create_pairing_session(serial="SERIAL001")
   assert result["pairing_url"].endswith("#" + code)
@@ -103,6 +103,16 @@ def test_pairing_client_contract(tmp_path, monkeypatch):
   original = private_key.read_bytes()
   client.ensure_key_pair()
   assert private_key.read_bytes() == original
+
+  wrong_curve = module.CarrotLinkClient("https://dashboard.example", tmp_path / "wrong-curve", FakeParams(), FakeSession([]))
+  wrong_curve.root.mkdir(parents=True)
+  (wrong_curve.root / "id_ecdsa").write_text(ECC.generate(curve="P-384").export_key(format="PEM"))
+  try:
+    wrong_curve.ensure_key_pair()
+  except module.CarrotLinkError as e:
+    assert "P-256" in str(e)
+  else:
+    raise AssertionError("P-384 key was accepted")
 
   register_claims = jwt.decode(session.calls[0][2]["headers"]["Authorization"].removeprefix("JWT "), options={"verify_signature": False})
   assert register_claims["identity"] == "comma-id"

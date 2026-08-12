@@ -31,8 +31,12 @@ class CarrotLinkClient:
   ):
     self.api_host = (api_host or os.getenv("CARROTLINK_API_HOST", "")).rstrip("/")
     parsed = urlsplit(self.api_host)
-    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
       raise CarrotLinkError("CARROTLINK_API_HOST must be an HTTPS origin")
+    try:
+      self.origin = (parsed.hostname, parsed.port or 443)
+    except ValueError as e:
+      raise CarrotLinkError("CARROTLINK_API_HOST must be an HTTPS origin") from e
 
     self.root = Path(persist_root or Paths.persist_root()) / "carrotlink"
     self.params = params or Params()
@@ -67,8 +71,8 @@ class CarrotLinkClient:
         key = ECC.import_key(private_path.read_text())
       except (ValueError, IndexError, TypeError) as e:
         raise CarrotLinkError("CarrotLink private key is invalid") from e
-      if not key.has_private():
-        raise CarrotLinkError("CarrotLink private key is invalid")
+    if not key.has_private() or key.curve != "NIST P-256":
+      raise CarrotLinkError("CarrotLink private key must be P-256")
 
     private_key = private_path.read_text()
     public_key = ECC.import_key(private_key).public_key().export_key(format="PEM")
@@ -178,7 +182,7 @@ class CarrotLinkClient:
       code = base64.b64decode(parsed.fragment + "=", altchars=b"-_", validate=True)
       if (
         parsed.scheme != "https"
-        or parsed.netloc != urlsplit(self.api_host).netloc
+        or (parsed.hostname, parsed.port or 443) != self.origin
         or parsed.path != "/pair"
         or parsed.query
         or len(parsed.fragment) != 43
