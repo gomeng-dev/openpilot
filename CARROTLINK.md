@@ -41,6 +41,11 @@ Comma에서 QR로 CarrotLink 플랫폼과 안전하게 페어링하고, 플랫�
 
 SunnyPilot과 SunnyLink는 동작과 UX를 이해하기 위한 참고 구현이며, 코드나 서비스 계약을 무단 복제하지 않는다.
 
+조사 결과와 구현 계획:
+
+- [`docs/SUNNYPILOT_PAIRING_RESEARCH.md`](docs/SUNNYPILOT_PAIRING_RESEARCH.md)
+- [`docs/CARROTLINK_PAIRING_PLAN.md`](docs/CARROTLINK_PAIRING_PLAN.md)
+
 ## 제품 원칙
 
 1. **레거시 유지**: Comma 자체 Carrot Web은 제거하지 않는다. 플랫폼 장애나 미페어링 상태에서도 로컬 관리가 가능해야 한다.
@@ -65,6 +70,17 @@ SunnyPilot과 SunnyLink는 동작과 UX를 이해하기 위한 참고 구현이�
 - 명령 ID와 만료 시각으로 재전송 및 중복 적용을 방지한다.
 - 플랫폼에서 장치 연결을 즉시 해제할 수 있어야 한다.
 - 토큰, QR payload, 고객·장치 식별자는 로그와 진단에서 최소화하거나 마스킹한다.
+
+## 확정된 페어링 결정
+
+- 기존 dashboard의 `ui_users`와 signed HttpOnly session cookie를 재사용한다.
+- comma key는 초기 장치 소유 증명에만 사용하고 지속 연결에는 CarrotLink 전용 ES256 key를 사용한다.
+- QR에는 5분짜리 256-bit random single-use code만 넣고 서버는 SHA-256 hash만 저장한다.
+- pairing code는 query가 아니라 URL fragment에 넣어 HTTP access log와 `Referer` 노출을 피한다.
+- 초기 권한 모델은 장치당 owner 1명이다. 공유·역할 기능은 요구가 생길 때 추가한다.
+- 기존 dashboard의 WebSocket Hub, JSON-RPC correlation, JWT 검증, PostgreSQL/sqlc 구조를 재사용한다.
+- offline command queue는 만들지 않는다. 장치가 offline이면 요청은 즉시 실패한다.
+- 원격 설정은 장치 측 allowlist와 offroad 검증을 모두 통과한 단일 key 변경부터 시작한다.
 
 ## 초기 기능 범위
 
@@ -101,14 +117,11 @@ SunnyPilot과 SunnyLink는 동작과 UX를 이해하기 위한 참고 구현이�
 
 아래 항목은 구현 전에 조사하고 ADR 또는 이 문서에 결정 근거를 남긴다.
 
-- 페어링 승인 및 계정 모델
-- 장치 인증서와 회전·폐기 방식
-- 지속 연결 방식(WebSocket, long polling 등)
-- 명령 전달 및 재시도 계약
-- 설정 스키마 버전 관리
-- 장치가 오프라인일 때 명령 보관 정책
-- 기존 대시보드 인증과 CarrotLink 권한 모델 통합 방식
+- 전용 key rotation UX와 분실 장치 복구 절차
+- 향후 다중 owner 또는 read-only 공유가 실제로 필요한지
+- `ShowDateTime`을 첫 원격 설정으로 사용할지 실장치 전 최종 확인
 
 ## 변경 기록
 
 - 2026-08-12: 프로젝트 목표, 저장소 책임, 안전 경계 및 초기 범위를 문서화했다.
+- 2026-08-12: SunnyPilot/SunnyLink 공개 구현을 조사하고 CarrotLink 페어링 계약·위협 모델·최소 구현 계획을 확정했다.

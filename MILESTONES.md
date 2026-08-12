@@ -18,24 +18,29 @@
 
 ## M1 — 참고 구현 조사와 계약 결정
 
-- [ ] SunnyPilot 장치 측 페어링 흐름 조사
-- [ ] SunnyLink frontend의 계정·장치·설정 흐름 조사
-- [ ] 현재 Carrot Web 설정 API와 Params 적용 경로 조사
-- [ ] 기존 `comma-log-manager` 인증·데이터 모델 조사
-- [ ] 위협 모델과 신뢰 경계 문서화
-- [ ] 최소 장치-플랫폼 계약 및 버전 전략 결정
+- [x] SunnyPilot 장치 측 페어링 흐름 조사
+- [x] SunnyLink frontend의 계정·장치·설정 흐름 조사
+- [x] 현재 Carrot Web 설정 API와 Params 적용 경로 조사
+- [x] 기존 `comma-log-manager` 인증·데이터 모델 조사
+- [x] 위협 모델과 신뢰 경계 문서화
+- [x] 최소 장치-플랫폼 계약 및 버전 전략 결정
 
 완료 조건:
 
 - QR 수명, 장치 인증, 폐기, 재전송 방지, 명령 결과 계약이 문서화된다.
 - 구현하지 않을 항목과 근거가 명확하다.
 
+근거:
+
+- [`docs/SUNNYPILOT_PAIRING_RESEARCH.md`](docs/SUNNYPILOT_PAIRING_RESEARCH.md)
+- [`docs/CARROTLINK_PAIRING_PLAN.md`](docs/CARROTLINK_PAIRING_PLAN.md)
+
 ## M2 — 로컬 페어링 수직 슬라이스
 
 - [ ] Comma에서 단일 사용 페어링 세션 생성
-- [ ] 기존 Carrot Web에 QR 표시 및 취소 UI 추가
+- [ ] 기존 Comma 설정 UI의 `PairingDialog`를 재사용해 CarrotLink QR·취소 UX 추가
 - [ ] 플랫폼에서 QR 승인 및 장치 등록
-- [ ] 장치별 자격 증명 발급·저장·폐기
+- [ ] CarrotLink 전용 장치 key 생성·저장·폐기
 - [ ] 페어링/해제 최소 통합 검사
 
 완료 조건:
@@ -96,4 +101,4 @@
 
 ## 현재 작업 경계
 
-이번 첫 작업은 **M0만 완료**한다. M1 조사나 기능 구현, 기존 대시보드 수정, Comma 배포는 시작하지 않는다.
+**M1 조사와 계획까지 완료**했다. 다음 단계는 M2 플랫폼 pairing state부터 시작한다. 아직 기능 구현, 기존 대시보드 수정, Comma 배포는 하지 않았다.
