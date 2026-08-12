@@ -195,6 +195,8 @@ code를 fragment에 넣으므로 HTTP request, reverse proxy access log, `Refere
 - owner session만 가능
 - owner revoke, active WebSocket close, pending command 취소
 - device가 offline이어도 서버 측 revoke는 즉시 완료
+- 장치는 다음 status 조회 또는 WebSocket 인증 실패에서 `revoked`를 로컬 unpaired 상태로 영속화하고 agent를 중지한다. 자동 재등록·재연결 loop는 만들지 않는다.
+- 전용 private key는 자동 삭제하지 않는다. 사용자가 새 pairing을 명시적으로 시작할 때 서버 credential과 함께 회전한다.
 
 ## 데이터 모델
 
@@ -256,6 +258,7 @@ carrotlink_device_owners(
 - 로그인하지 않은 claim 401
 - 다른 user의 status/unpair 403
 - unpair 직후 active socket 종료와 재접속 401
+- offline 장치가 다시 연결했을 때 revoked 상태 영속화와 agent 중지
 
 ### 2. 장치: 전용 identity와 pairing client
 

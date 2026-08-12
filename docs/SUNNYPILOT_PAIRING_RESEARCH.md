@@ -72,18 +72,21 @@ GitHub 계정 페어링일 때:
 - [JWT 기본 claim과 1시간 만료](https://github.com/sunnypilot/sunnypilot/blob/2d859a8ca610bc20f48b0b3e4f7d570a80b59c29/openpilot/common/api/base.py#L30-L48)
 - [기존 QR renderer의 5분 refresh](https://github.com/sunnypilot/sunnypilot/blob/2d859a8ca610bc20f48b0b3e4f7d570a80b59c29/openpilot/selfdrive/ui/widgets/pairing_dialog.py#L18-L68)
 
-### 공개 코드에서 확인되지 않는 동작
+### 공개 계약과 확인되지 않는 backend 동작
 
-`/sso` backend 구현은 공개 저장소에서 찾지 못했다. 다음은 공개 client 계약으로만 추론 가능하다.
+legacy v0 OpenAPI schema에는 다음 계약이 남아 있다.
 
-- `state`의 JWT 서명을 등록된 public key로 검증할 가능성이 높다.
-- 로그인 사용자와 device를 연결하는 레코드를 만든다.
+- `GET /sso?state=<state>`
+- `GET /sso/auth?...&state=<state>`
+- `POST /device/{deviceId}/users/{userId}?pairingToken=<JWT>`
+- `PairDeviceWithUser` 설명은 runtime API JWT와 같은 token을 pairing에서는 one-time code로 쓴다고 명시한다.[15]
 - 공개 OpenAPI 타입에 `DeviceUserResponseModel(device_id, user_id, token_hash, timestamps)`가 있다.[7]
 - 한 장치에 여러 user를 연결할 수 있다.[7]
 
-하지만 다음은 공개 코드로 확정할 수 없다.
+하지만 `/sso` backend 구현은 공개 저장소에서 찾지 못했다. 따라서 다음은 확정할 수 없다.
 
-- `state`의 단일 사용 여부와 replay 방지 방식
+- JWT의 실제 단일 사용 marker 저장과 atomic consumption 방식
+- `state`의 JWT 서명 검증 및 OAuth user 연결 순서
 - 실제 만료 검증 정책
 - claim transaction의 동시성 처리
 - `token_hash`의 생성·용도·회전 방식
@@ -93,6 +96,7 @@ GitHub 계정 페어링일 때:
 
 - [공개 DeviceUser 타입](https://github.com/sunnypilot/sunnylink-frontend/blob/a702451a1144edb057ca368f3e962faf6b9e40ae/src/sunnylink/v1/schema_api.d.ts#L840-L849)
 - [사용자별 장치 조회 계약](https://github.com/sunnypilot/sunnylink-frontend/blob/a702451a1144edb057ca368f3e962faf6b9e40ae/src/sunnylink/v1/schema_api.d.ts#L126-L166)
+- [legacy SSO와 one-time pairing contract](https://github.com/sunnypilot/sunnylink-frontend/blob/a702451a1144edb057ca368f3e962faf6b9e40ae/src/sunnylink/v0/schema_api.d.ts#L347-L365)
 
 ## 3. 장치의 페어링 완료 감지
 
@@ -121,6 +125,7 @@ SunnyLink frontend는 SvelteKit과 Logto browser SDK를 사용한다.
 - 로그인된 사용자는 `GET /v1/users/self/devices`로 paired device 목록을 가져온다.[5]
 - `PairingModal.svelte`는 comma 3X/4에서 SunnyLink 설정 화면과 QR을 여는 방법만 보여 준다. QR payload를 읽거나 claim API를 호출하지 않는다.[3]
 - 장치 해제는 `DELETE /device/{deviceId}`, 개별 user 제거는 `DELETE /device/{deviceId}/users/{userId}` 계약을 사용한다.[2]
+- deregister modal은 서버 deregister 후 user association을 제거한다.[16] 장치 측에는 `SunnylinkDongleId`와 role/user cache를 지우는 대응 경로가 없어 웹 해제 뒤 로컬 stale state가 남는다.[10][13]
 
 근거:
 
@@ -129,6 +134,7 @@ SunnyLink frontend는 SvelteKit과 Logto browser SDK를 사용한다.
 - [사용자 장치 목록 로드](https://github.com/sunnypilot/sunnylink-frontend/blob/a702451a1144edb057ca368f3e962faf6b9e40ae/src/routes/%2Blayout.ts#L41-L100)
 - [PairingModal은 안내 UI](https://github.com/sunnypilot/sunnylink-frontend/blob/a702451a1144edb057ca368f3e962faf6b9e40ae/src/lib/components/PairingModal.svelte#L194-L271)
 - [장치·사용자 해제 API 호출](https://github.com/sunnypilot/sunnylink-frontend/blob/a702451a1144edb057ca368f3e962faf6b9e40ae/src/lib/api/device.ts#L666-L682)
+- [deregister 순서](https://github.com/sunnypilot/sunnylink-frontend/blob/a702451a1144edb057ca368f3e962faf6b9e40ae/src/lib/components/DeregisterDeviceModal.svelte#L69-L99)
 
 ## 5. 장치 연결과 원격 설정
 
@@ -139,6 +145,7 @@ SunnyPilot은 별도 `sunnylinkd`를 실행한다.
 - 장치가 `wss://athena.sunnylink.ai`로 outbound WebSocket을 연다.[1][11]
 - `Authorization: Bearer <device-signed JWT>`를 보낸다.[11]
 - localhost가 아닌 연결은 TLS certificate 검증을 요구한다.[11]
+- 예외적으로 `startLocalProxy(remote_ws_uri, ...)`는 전달된 remote URI에 `CERT_NONE`을 사용한다.[11]
 - 기존 Athena의 WebSocket/JSON-RPC worker를 광범위하게 재사용한다.
 - 설정 조회는 Params key·metadata·value RPC로 제공한다.
 - 설정 변경은 `saveParams`로 여러 Params를 쓴다.[2][11]
@@ -197,11 +204,12 @@ SunnyPilot은 별도 `sunnylinkd`를 실행한다.
 | 전체 Athena daemon 재사용 | 기존 transport + 최소 RPC 4개 | upload/proxy/log 기능은 페어링·설정에 불필요 |
 | Logto 추가 | 기존 dashboard session 재사용 | 새 identity provider와 frontend dependency가 불필요 |
 | 다중 user/roles | 초기 owner 1명 | 현재 개인 dashboard 요구를 충족하며 권한 모델을 최소화 |
+| 웹 deregister 뒤 로컬 ID/cache 보존 | revoke를 장치가 영속 반영하고 agent 중지 | stale identity와 무한 재연결 방지 |
 
 ## 8. 조사 한계
 
 - SunnyLink backend source는 공개 GitHub 조직에서 확인하지 못했다.
-- 서버의 실제 `/sso`, replay 방지, token hash, ownership transaction은 검증하지 못했다.
+- legacy schema는 pairing token을 one-time code라고 명시하지만 서버의 실제 `/sso`, atomic replay 방지, token hash, ownership transaction은 검증하지 못했다.
 - staging/production 서비스에 임의 요청을 보내지 않았다.
 - 실제 Comma나 CarrotLink backend를 변경·재시작하지 않았다.
 
@@ -221,3 +229,5 @@ SunnyPilot은 별도 `sunnylinkd`를 실행한다.
 [12] https://github.com/sunnypilot/sunnypilot/blob/2d859a8ca610bc20f48b0b3e4f7d570a80b59c29/openpilot/sunnypilot/sunnylink/registration_manager.py
 [13] https://github.com/sunnypilot/sunnypilot/blob/2d859a8ca610bc20f48b0b3e4f7d570a80b59c29/openpilot/sunnypilot/sunnylink/sunnylink_state.py
 [14] https://github.com/sunnypilot/sunnypilot/blob/2d859a8ca610bc20f48b0b3e4f7d570a80b59c29/openpilot/system/ui/sunnypilot/widgets/sunnylink_pairing_dialog.py
+[15] https://github.com/sunnypilot/sunnylink-frontend/blob/a702451a1144edb057ca368f3e962faf6b9e40ae/src/sunnylink/v0/schema_api.d.ts
+[16] https://github.com/sunnypilot/sunnylink-frontend/blob/a702451a1144edb057ca368f3e962faf6b9e40ae/src/lib/components/DeregisterDeviceModal.svelte
