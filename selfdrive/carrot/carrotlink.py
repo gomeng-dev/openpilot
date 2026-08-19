@@ -28,6 +28,7 @@ PAIRING_TTL = 5 * 60
 DEFAULT_API_HOST = "https://commalink.gomeng-dev.com"
 CONNECTION_RETRY_MAX = 60.0
 CONNECTION_IDLE_TIMEOUTS = 12
+CONNECTION_MESSAGE_MAX = 4 * 1024
 
 
 class CarrotLinkError(Exception):
@@ -318,6 +319,8 @@ def _connection_state(params: Params, metadata) -> dict:
 
 def handle_connection_rpc(message: str, state_provider) -> str:
   request_id = None
+  if not isinstance(message, str) or len(message) > CONNECTION_MESSAGE_MAX:
+    return json.dumps({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}, "id": None}, separators=(",", ":"))
   try:
     request = json.loads(message)
   except (TypeError, ValueError, RecursionError):
@@ -373,6 +376,8 @@ def run_connection(exit_event: threading.Event | None = None, client: CarrotLink
       sock = connector(
         client.connection_url(), header=["Authorization: JWT " + token], timeout=15, enable_multithread=True, redirect_limit=0,
       )
+      if sock.getstatus() != 101:
+        raise WebSocketException("unexpected WebSocket status")
       sock.settimeout(5)
       idle_timeouts = 0
       while not exit_event.is_set():

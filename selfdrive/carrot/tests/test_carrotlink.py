@@ -218,14 +218,18 @@ def test_gone_response_persists_revocation(tmp_path, monkeypatch):
 
 
 class FakeWebSocket:
-  def __init__(self, message, exit_event):
+  def __init__(self, message, exit_event, status=101):
     self.message = message
     self.exit_event = exit_event
+    self.status = status
     self.sent = []
     self.closed = False
 
   def settimeout(self, _timeout):
     pass
+
+  def getstatus(self):
+    return self.status
 
   def recv(self):
     self.exit_event.set()
@@ -246,6 +250,9 @@ class TimeoutWebSocket(FakeWebSocket):
   def recv(self):
     self.recv_count += 1
     raise WebSocketTimeoutException()
+
+  def getstatus(self):
+    return 101
 
 
 def paired_connection_client(module, tmp_path):
@@ -311,6 +318,21 @@ def test_read_only_connection_reconnects_and_rejects_revoked(tmp_path, monkeypat
 
   nested = "[" * 10_000 + "0" + "]" * 10_000
   assert json.loads(module.handle_connection_rpc(nested, dict))["error"]["code"] == -32700
+  oversized = " " * (module.CONNECTION_MESSAGE_MAX + 1)
+  assert json.loads(module.handle_connection_rpc(oversized, dict))["error"]["code"] == -32700
+
+  redirect_event = threading.Event()
+  redirect_sock = FakeWebSocket(request, redirect_event, status=302)
+
+  def redirect_connector(_url, **_kwargs):
+    if redirect_sock.closed:
+      redirect_event.set()
+      raise OSError("redirect refused")
+    return redirect_sock
+
+  module.run_connection(redirect_event, paired_connection_client(module, tmp_path / "redirect"), redirect_connector, dict)
+  assert redirect_sock.closed
+  assert redirect_sock.sent == []
 
   revoked = paired_connection_client(module, tmp_path / "revoked-connection")
   revoked_event = threading.Event()
