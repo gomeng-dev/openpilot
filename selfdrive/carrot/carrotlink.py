@@ -16,7 +16,7 @@ from Crypto.PublicKey import ECC
 from openpilot.common.api import get_key_pair
 from openpilot.common.params import Params
 from openpilot.common.utils import atomic_write
-from openpilot.system.hardware import HARDWARE
+from openpilot.system.hardware import HARDWARE, PC
 from openpilot.system.hardware.hw import Paths
 
 
@@ -26,6 +26,11 @@ DEFAULT_API_HOST = "https://commalink.gomeng-dev.com"
 
 class CarrotLinkError(Exception):
   pass
+
+
+def _carrotlink_root(persist_root: str | Path | None = None) -> Path:
+  # /persist is read-only on devices; /data is persistent and app-writable.
+  return Path(persist_root or (Paths.persist_root() if PC else "/data")) / "carrotlink"
 
 
 class CarrotLinkClient:
@@ -41,7 +46,7 @@ class CarrotLinkClient:
     except ValueError as e:
       raise CarrotLinkError("CARROTLINK_API_HOST must be an HTTPS origin") from e
 
-    self.root = Path(persist_root or Paths.persist_root()) / "carrotlink"
+    self.root = _carrotlink_root(persist_root)
     self.params = params or Params()
     self.session = session or requests.Session()
 
@@ -245,7 +250,7 @@ class CarrotLinkClient:
 
 
 def carrotlink_state(persist_root: str | Path | None = None) -> str:
-  path = Path(persist_root or Paths.persist_root()) / "carrotlink" / "state"
+  path = _carrotlink_root(persist_root) / "state"
   try:
     state = path.read_text().strip()
   except OSError:

@@ -63,7 +63,7 @@ def load_module(tmp_path, monkeypatch):
     "openpilot.common.api": types.SimpleNamespace(get_key_pair=lambda: ("RS256", comma_private, rsa.public_key().export_key().decode())),
     "openpilot.common.params": types.SimpleNamespace(Params=FakeParams),
     "openpilot.common.utils": types.SimpleNamespace(atomic_write=atomic_write),
-    "openpilot.system.hardware": types.SimpleNamespace(HARDWARE=types.SimpleNamespace(get_serial=lambda: "SERIAL001")),
+    "openpilot.system.hardware": types.SimpleNamespace(HARDWARE=types.SimpleNamespace(get_serial=lambda: "SERIAL001"), PC=True),
     "openpilot.system.hardware.hw": types.SimpleNamespace(Paths=types.SimpleNamespace(persist_root=lambda: str(tmp_path))),
   }
   for name, module in modules.items():
@@ -80,6 +80,9 @@ def load_module(tmp_path, monkeypatch):
 
 def test_pairing_client_contract(tmp_path, monkeypatch):
   module = load_module(tmp_path, monkeypatch)
+  assert module._carrotlink_root() == tmp_path / "carrotlink"
+  monkeypatch.setattr(module, "PC", False)
+  assert module._carrotlink_root() == Path("/data/carrotlink")
   device_id, session_id = str(uuid.uuid4()), str(uuid.uuid4())
   code = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode()
   session = FakeSession(
