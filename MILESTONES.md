@@ -48,12 +48,12 @@
 - mock 또는 개발 환경에서 QR 생성부터 등록·해제까지 재현 가능하다.
 - QR이나 로그에 장기 비밀값이 노출되지 않는다.
 
-## M3 — 읽기 전용 장치 연결
+## M3 — 읽기 전용 장치 연결 ✅
 
-- [ ] 장치의 인증된 아웃바운드 연결
-- [ ] 플랫폼에서 연결 상태와 마지막 접속 표시
-- [ ] CarrotPilot 버전, 브랜치 및 기본 장치 상태 표시
-- [ ] 재연결과 자격 증명 폐기 검증
+- [x] 장치의 인증된 아웃바운드 연결
+- [x] 플랫폼에서 연결 상태와 마지막 접속 표시
+- [x] CarrotPilot 버전, 브랜치 및 기본 장치 상태 표시
+- [x] 재연결과 자격 증명 폐기 검증
 
 완료 조건:
 
@@ -101,4 +101,4 @@
 
 ## 현재 작업 경계
 
-**M2 로컬 페어링 수직 슬라이스를 진행 중**이다. 플랫폼 pairing API와 `/pair` 승인 화면, Comma client와 tici/mici QR dialog 연결까지 구현했다. 다음 단계는 Linux/device UI build 검증과 공개 개발 환경의 실제 claim E2E다. 실제 Comma 배포는 사용자 승인 전까지 하지 않는다.
+**M3 읽기 전용 장치 연결을 완료**했다. 실제 Comma의 P-256 identity로 outbound WebSocket 연결, 상태 조회, presence 표시와 backend 재기동 후 자동 재연결을 검증했다. 실제 paired 장치 revoke는 수행하지 않고 PostgreSQL integration test와 HTTP 410 client test로 검증했다. 다음 작업은 별도 승인 전까지 M4 설정 조회·변경으로 확장하지 않는다.
