@@ -1,8 +1,10 @@
 import base64
 import os
 import re
+import threading
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -19,6 +21,7 @@ from openpilot.system.hardware.hw import Paths
 
 
 PAIRING_TTL = 5 * 60
+DEFAULT_API_HOST = "https://commalink.gomeng-dev.com"
 
 
 class CarrotLinkError(Exception):
@@ -29,7 +32,7 @@ class CarrotLinkClient:
   def __init__(
     self, api_host: str | None = None, persist_root: str | Path | None = None, params: Params | None = None, session: requests.Session | None = None
   ):
-    self.api_host = (api_host or os.getenv("CARROTLINK_API_HOST", "")).rstrip("/")
+    self.api_host = (api_host or os.getenv("CARROTLINK_API_HOST", DEFAULT_API_HOST)).rstrip("/")
     parsed = urlsplit(self.api_host)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.path not in ("", "/") or parsed.query or parsed.fragment:
       raise CarrotLinkError("CARROTLINK_API_HOST must be an HTTPS origin")
@@ -54,6 +57,10 @@ class CarrotLinkClient:
   def _read(self, name: str) -> str | None:
     path = self.root / name
     return path.read_text().strip() if path.is_file() else None
+
+  def local_state(self) -> str:
+    state = self._read("state")
+    return state if state in ("pending", "paired", "revoked") else "unpaired"
 
   def ensure_key_pair(self) -> tuple[str, str]:
     self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -190,7 +197,9 @@ class CarrotLinkClient:
       ):
         raise ValueError
       uuid.UUID(session_id)
-      datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+      expires = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+      if expires.tzinfo is None:
+        raise ValueError
     except (KeyError, TypeError, ValueError, requests.JSONDecodeError) as e:
       raise CarrotLinkError("CarrotLink pairing response is invalid") from e
     self._write(self.root / "state", "pending", overwrite=True)
@@ -233,3 +242,120 @@ class CarrotLinkClient:
     token = self._device_token(device_id, "pairing-session")
     self._request("DELETE", f"/v1/carrotlink/devices/{device_id}/pairing-sessions/{session_id}", token, 204)
     self._write(self.root / "state", "pending", overwrite=True)
+
+
+def carrotlink_state(persist_root: str | Path | None = None) -> str:
+  path = Path(persist_root or Paths.persist_root()) / "carrotlink" / "state"
+  try:
+    state = path.read_text().strip()
+  except OSError:
+    return "unpaired"
+  return state if state in ("pending", "paired", "revoked") else "unpaired"
+
+
+@dataclass(frozen=True)
+class PairingSnapshot:
+  state: str
+  pairing_url: str | None = None
+  error: str | None = None
+
+
+# ponytail: one device pairing at a time; revisit only if parallel sessions become a real requirement.
+_PAIRING_WORKER_LOCK = threading.Lock()
+
+
+class CarrotLinkPairing:
+  """One short-lived pairing worker shared by both comma UIs."""
+
+  def __init__(self, client: CarrotLinkClient | None = None, poll_interval: float = 2.0):
+    if poll_interval <= 0:
+      raise ValueError("poll_interval must be positive")
+    self._client = client
+    self._poll_interval = poll_interval
+    self._lock = threading.Lock()
+    self._stop = threading.Event()
+    self._abandon = threading.Event()
+    self._thread: threading.Thread | None = None
+    self._snapshot = PairingSnapshot("idle")
+
+  def snapshot(self) -> PairingSnapshot:
+    with self._lock:
+      return self._snapshot
+
+  def _set_snapshot(self, state: str, pairing_url: str | None = None, error: str | None = None):
+    with self._lock:
+      self._snapshot = PairingSnapshot(state, pairing_url, error)
+
+  def start(self):
+    with self._lock:
+      if self._thread is not None and self._thread.is_alive():
+        return
+      self._snapshot = PairingSnapshot("loading")
+      self._stop.clear()
+      self._abandon.clear()
+      self._thread = threading.Thread(target=self._run, daemon=True)
+      thread = self._thread
+    thread.start()
+
+  def stop(self, cancel: bool = True):
+    if not cancel:
+      self._abandon.set()
+    self._stop.set()
+
+  def _run(self):
+    with _PAIRING_WORKER_LOCK:
+      if self._stop.is_set():
+        return
+      self._run_session()
+
+  def _run_session(self):
+    client: CarrotLinkClient | None = self._client
+    session_id: str | None = None
+    pairing_url: str | None = None
+    try:
+      if self._stop.is_set():
+        return
+      client = client or CarrotLinkClient()
+      result = client.create_pairing_session()
+      session_id = result["session_id"]
+      pairing_url = result["pairing_url"]
+      expires_at = datetime.fromisoformat(result["expires_at"].replace("Z", "+00:00"))
+      deadline = time.monotonic() + min(PAIRING_TTL, max(0.0, (expires_at - datetime.now(UTC)).total_seconds()))
+      self._set_snapshot("pending", pairing_url)
+
+      while not self._stop.is_set():
+        state = client.pairing_status()
+        if state != "pending":
+          self._set_snapshot(state, pairing_url if state == "paired" else None)
+          return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+          self._set_snapshot("expired")
+          return
+        if self._stop.wait(min(self._poll_interval, remaining)):
+          break
+    except CarrotLinkError as e:
+      if not self._stop.is_set():
+        state = client.local_state() if client is not None else "unpaired"
+        self._set_snapshot("revoked" if state == "revoked" else "error", error=None if state == "revoked" else str(e))
+    except Exception:
+      if not self._stop.is_set():
+        self._set_snapshot("error", error="CarrotLink pairing failed")
+    finally:
+      state = self.snapshot().state
+      if (
+        not self._abandon.is_set()
+        and client is not None
+        and session_id is not None
+        and state not in ("paired", "revoked")
+        and (self._stop.is_set() or state in ("expired", "error"))
+      ):
+        try:
+          client.cancel_pairing_session(session_id)
+        except CarrotLinkError:
+          try:
+            reconciled = client.pairing_status()
+            if reconciled != "pending":
+              self._set_snapshot(reconciled, pairing_url if reconciled == "paired" else None)
+          except CarrotLinkError:
+            pass

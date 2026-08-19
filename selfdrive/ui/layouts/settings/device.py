@@ -1,13 +1,17 @@
 import os
 import math
+import time
 
 from cereal import messaging, log
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.time_helpers import system_time_valid
+from openpilot.selfdrive.carrot.carrotlink import carrotlink_state
 from openpilot.selfdrive.ui.onroad.driver_camera_dialog import DriverCameraDialog
 from openpilot.selfdrive.ui.ui_state import ui_state
 from openpilot.selfdrive.ui.layouts.onboarding import TrainingGuide
+from openpilot.selfdrive.ui.widgets.carrotlink_pairing_dialog import CarrotLinkPairingDialog
 from openpilot.selfdrive.ui.widgets.pairing_dialog import PairingDialog
 from openpilot.system.ui.lib.application import FontWeight, gui_app
 from openpilot.system.ui.lib.multilang import multilang, tr, tr_noop
@@ -21,6 +25,7 @@ from openpilot.system.ui.widgets.scroller_tici import Scroller
 # Description constants
 DESCRIPTIONS = {
   'pair_device': tr_noop("Pair your device with comma connect (connect.comma.ai) and claim your comma prime offer."),
+  'pair_carrotlink': tr_noop("Pair this device with CommaLink for private remote management."),
   'driver_camera': tr_noop("Preview the driver facing camera to ensure that driver monitoring has good visibility. (vehicle must be off)"),
   'reset_calibration': tr_noop("openpilot requires the device to be mounted within 4° left or right and within 5° up or 9° down."),
   'review_guide': tr_noop("Review the rules, features, and limitations of openpilot"),
@@ -35,6 +40,8 @@ class DeviceLayout(Widget):
     self._select_language_dialog: MultiOptionDialog | None = None
     self._fcc_dialog: HtmlModal | None = None
     self._training_guide: TrainingGuide | None = None
+    self._carrotlink_state = carrotlink_state()
+    self._carrotlink_state_refresh = time.monotonic()
 
     items = self._initialize_items()
     self._scroller = Scroller(items, line_separator=True, spacing=0)
@@ -45,6 +52,12 @@ class DeviceLayout(Widget):
     self._pair_device_btn = button_item(lambda: tr("Pair Device"), lambda: tr("PAIR"), lambda: tr(DESCRIPTIONS['pair_device']),
                                         callback=lambda: gui_app.push_widget(PairingDialog()))
     self._pair_device_btn.set_visible(lambda: not ui_state.prime_state.is_paired())
+
+    self._carrotlink_pair_btn = button_item(
+      "CarrotLink", lambda: tr({"paired": "PAIRED", "revoked": "REVOKED"}.get(self._carrotlink_state, "PAIR")),
+      lambda: tr(DESCRIPTIONS['pair_carrotlink']), callback=self._show_carrotlink_pairing,
+      enabled=lambda: ui_state.is_offroad() and self._carrotlink_state not in ("paired", "revoked"),
+    )
 
     self._reset_calib_btn = button_item(lambda: tr("Reset Calibration"), lambda: tr("RESET"), lambda: tr(DESCRIPTIONS['reset_calibration']),
                                         callback=self._reset_calibration_prompt)
@@ -57,6 +70,7 @@ class DeviceLayout(Widget):
       text_item(lambda: tr("Dongle ID"), self._params.get("DongleId") or (lambda: tr("N/A"))),
       text_item(lambda: tr("Serial"), self._params.get("HardwareSerial") or (lambda: tr("N/A"))),
       self._pair_device_btn,
+      self._carrotlink_pair_btn,
       button_item(lambda: tr("Driver Camera"), lambda: tr("PREVIEW"), lambda: tr(DESCRIPTIONS['driver_camera']),
                   callback=lambda: gui_app.push_widget(DriverCameraDialog()), enabled=ui_state.is_offroad),
       self._reset_calib_btn,
@@ -67,6 +81,22 @@ class DeviceLayout(Widget):
       self._power_off_btn,
     ]
     return items
+
+  def _show_carrotlink_pairing(self):
+    if not system_time_valid():
+      gui_app.push_widget(alert_dialog(tr("Please connect to Wi-Fi to pair with CarrotLink")))
+      return
+    gui_app.push_widget(CarrotLinkPairingDialog(state_callback=self._on_carrotlink_state))
+
+  def _on_carrotlink_state(self, state: str):
+    self._carrotlink_state = state
+
+  def _update_state(self):
+    super()._update_state()
+    now = time.monotonic()
+    if now - self._carrotlink_state_refresh >= 1.0:
+      self._carrotlink_state = carrotlink_state()
+      self._carrotlink_state_refresh = now
 
   def _offroad_transition(self):
     self._power_off_btn.action_item.right_button.set_visible(ui_state.is_offroad())

@@ -285,17 +285,17 @@ carrotlink_device_owners(
 
 수정 대상:
 
-- `selfdrive/ui/widgets/pairing_dialog.py`
-- `selfdrive/ui/mici/widgets/pairing_dialog.py`
+- `selfdrive/ui/widgets/carrotlink_pairing_dialog.py`
+- `selfdrive/ui/mici/widgets/carrotlink_pairing_dialog.py`
 - `selfdrive/ui/layouts/settings/device.py` 및 mici 대응 진입점
 
 방법:
 
-- QR 생성·texture·5분 refresh 코드는 그대로 둔다.
-- dialog에 pairing URL provider와 title/instructions만 주입할 수 있게 최소 확장한다.
-- 기존 comma pairing call site는 기본값으로 동작하게 유지한다.
-- CarrotLink button은 offroad + network available에서만 활성화한다.
-- paired 전환, 만료, 취소, network failure를 표시한다.
+- SunnyPilot의 `SunnylinkPairingDialog(PairingDialog)` 패턴처럼 기존 QR renderer를 상속한다.
+- 기존 tici/mici `PairingDialog`와 comma pairing call site는 수정하지 않는다.
+- CarrotLink subclass는 title/instructions, 비동기 session URL, 완료·만료·취소 상태만 담당한다.
+- CarrotLink button은 offroad에서만 활성화하고, system time이 유효하지 않으면 Wi-Fi 연결 안내를 표시한다.
+- paired 전환, 만료, 취소, network failure를 dialog에 표시한다.
 
 별도 QR library, webview, frontend runtime은 추가하지 않는다.
 

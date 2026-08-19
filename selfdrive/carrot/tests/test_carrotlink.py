@@ -3,9 +3,12 @@ import importlib.util
 import os
 import stat
 import sys
+import threading
+import time
 import types
 import uuid
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import jwt
@@ -196,3 +199,189 @@ def test_gone_response_persists_revocation(tmp_path, monkeypatch):
     raise AssertionError("revoked pairing succeeded")
   assert client.pairing_status() == "revoked"
   assert len(session.calls) == 1
+
+
+class FakePairingClient:
+  def __init__(self, statuses=("pending",), expires_at=None, local_state="pending", status_delay=0.0, cancel_error=None):
+    self.statuses = iter(statuses)
+    self.last_status = "pending"
+    self.state = local_state
+    self.status_delay = status_delay
+    self.cancel_error = cancel_error
+    self.status_calls = 0
+    self.create_calls = 0
+    self.cancelled = []
+    self.result = {
+      "session_id": str(uuid.uuid4()),
+      "pairing_url": "https://dashboard.example/pair#" + "A" * 43,
+      "expires_at": expires_at or (datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
+    }
+
+  def create_pairing_session(self):
+    self.create_calls += 1
+    return self.result
+
+  def pairing_status(self):
+    self.status_calls += 1
+    time.sleep(self.status_delay)
+    status = next(self.statuses, self.last_status)
+    if isinstance(status, Exception):
+      raise status
+    self.last_status = status
+    return self.last_status
+
+  def local_state(self):
+    return self.state
+
+  def cancel_pairing_session(self, session_id):
+    self.cancelled.append(session_id)
+    if self.cancel_error is not None:
+      raise self.cancel_error
+
+
+class SlowCreatePairingClient(FakePairingClient):
+  def __init__(self):
+    super().__init__()
+    self.create_started = threading.Event()
+    self.release_create = threading.Event()
+
+  def create_pairing_session(self):
+    self.create_started.set()
+    self.release_create.wait(1.0)
+    return super().create_pairing_session()
+
+
+def wait_for(predicate, timeout=1.0):
+  deadline = time.monotonic() + timeout
+  while time.monotonic() < deadline:
+    if predicate():
+      return
+    time.sleep(0.005)
+  raise AssertionError("condition timed out")
+
+
+def test_pairing_worker_reaches_paired_and_cancels_on_close(tmp_path, monkeypatch):
+  module = load_module(tmp_path, monkeypatch)
+
+  paired_client = FakePairingClient(("pending", "paired"))
+  pairing = module.CarrotLinkPairing(paired_client, poll_interval=0.01)
+  pairing.start()
+  wait_for(lambda: pairing.snapshot().state == "paired")
+  assert pairing.snapshot().pairing_url == paired_client.result["pairing_url"]
+  pairing.stop()
+  assert paired_client.cancelled == []
+
+  pending_client = FakePairingClient()
+  pairing = module.CarrotLinkPairing(pending_client, poll_interval=0.01)
+  pairing.start()
+  wait_for(lambda: pairing.snapshot().state == "pending" and pending_client.status_calls > 0)
+  pairing.stop()
+  wait_for(lambda: pending_client.cancelled == [pending_client.result["session_id"]])
+
+
+def test_pairing_worker_cancels_if_closed_during_session_creation(tmp_path, monkeypatch):
+  module = load_module(tmp_path, monkeypatch)
+  client = SlowCreatePairingClient()
+  pairing = module.CarrotLinkPairing(client, poll_interval=0.01)
+
+  pairing.start()
+  assert client.create_started.wait(1.0)
+  pairing.stop()
+  client.release_create.set()
+
+  wait_for(lambda: client.cancelled == [client.result["session_id"]])
+
+  abandoned_client = SlowCreatePairingClient()
+  pairing = module.CarrotLinkPairing(abandoned_client, poll_interval=0.01)
+  pairing.start()
+  assert abandoned_client.create_started.wait(1.0)
+  pairing.stop(cancel=False)
+  pairing.stop()
+  abandoned_client.release_create.set()
+  wait_for(lambda: pairing._thread is not None and not pairing._thread.is_alive())
+  assert abandoned_client.cancelled == []
+
+
+def test_pairing_workers_are_serialized(tmp_path, monkeypatch):
+  module = load_module(tmp_path, monkeypatch)
+  first_client = SlowCreatePairingClient()
+  second_client = FakePairingClient()
+  first = module.CarrotLinkPairing(first_client, poll_interval=0.01)
+  second = module.CarrotLinkPairing(second_client, poll_interval=0.01)
+
+  first.start()
+  assert first_client.create_started.wait(1.0)
+  second.start()
+  time.sleep(0.02)
+  assert second_client.create_calls == 0
+
+  first.stop()
+  first_client.release_create.set()
+  wait_for(lambda: second_client.create_calls == 1)
+  second.stop()
+  wait_for(lambda: second_client.cancelled == [second_client.result["session_id"]])
+
+
+def test_pairing_worker_reconciles_claim_that_wins_cancel_race(tmp_path, monkeypatch):
+  module = load_module(tmp_path, monkeypatch)
+  client = FakePairingClient(("pending", "paired"), cancel_error=module.CarrotLinkError("not cancellable"))
+  pairing = module.CarrotLinkPairing(client, poll_interval=10.0)
+
+  pairing.start()
+  wait_for(lambda: pairing.snapshot().state == "pending" and client.status_calls == 1)
+  pairing.stop()
+
+  wait_for(lambda: pairing.snapshot().state == "paired")
+  assert client.cancelled == [client.result["session_id"]]
+
+
+def test_pairing_worker_expires_stale_qr(tmp_path, monkeypatch):
+  module = load_module(tmp_path, monkeypatch)
+  client = FakePairingClient(expires_at=(datetime.now(UTC) - timedelta(seconds=1)).isoformat())
+  pairing = module.CarrotLinkPairing(client, poll_interval=0.01)
+  pairing.start()
+  wait_for(lambda: pairing.snapshot().state == "expired")
+  assert client.status_calls == 1
+  wait_for(lambda: client.cancelled == [client.result["session_id"]])
+
+  paired_client = FakePairingClient(("paired",), expires_at=(datetime.now(UTC) - timedelta(seconds=1)).isoformat())
+  pairing = module.CarrotLinkPairing(paired_client, poll_interval=0.01)
+  pairing.start()
+  wait_for(lambda: pairing.snapshot().state == "paired")
+
+  monkeypatch.setattr(module, "PAIRING_TTL", 0.02)
+  capped_client = FakePairingClient(expires_at=(datetime.now(UTC) + timedelta(hours=1)).isoformat(), status_delay=0.05)
+  pairing = module.CarrotLinkPairing(capped_client, poll_interval=1.0)
+  pairing.start()
+  wait_for(lambda: pairing.snapshot().state == "expired")
+  assert capped_client.status_calls == 1
+  wait_for(lambda: capped_client.cancelled == [capped_client.result["session_id"]])
+
+
+def test_pairing_worker_constructs_client_off_ui_thread(tmp_path, monkeypatch):
+  module = load_module(tmp_path, monkeypatch)
+
+  def invalid_client():
+    raise module.CarrotLinkError("invalid host")
+
+  monkeypatch.setattr(module, "CarrotLinkClient", invalid_client)
+  pairing = module.CarrotLinkPairing()
+  pairing.start()
+  wait_for(lambda: pairing.snapshot().state == "error")
+
+
+def test_pairing_worker_cleans_up_errors_and_surfaces_revocation(tmp_path, monkeypatch):
+  module = load_module(tmp_path, monkeypatch)
+
+  error_client = FakePairingClient((module.CarrotLinkError("unavailable"),))
+  pairing = module.CarrotLinkPairing(error_client, poll_interval=0.01)
+  pairing.start()
+  wait_for(lambda: pairing.snapshot().state == "error")
+  wait_for(lambda: error_client.cancelled == [error_client.result["session_id"]])
+
+  revoked_client = FakePairingClient((module.CarrotLinkError("revoked"),), local_state="revoked")
+  pairing = module.CarrotLinkPairing(revoked_client, poll_interval=0.01)
+  pairing.start()
+  wait_for(lambda: pairing.snapshot().state == "revoked")
+  assert pairing.snapshot().pairing_url is None
+  assert revoked_client.cancelled == []

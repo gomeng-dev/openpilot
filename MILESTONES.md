@@ -37,11 +37,11 @@
 
 ## M2 — 로컬 페어링 수직 슬라이스
 
-- [ ] Comma에서 단일 사용 페어링 세션 생성
-- [ ] 기존 Comma 설정 UI의 `PairingDialog`를 재사용해 CarrotLink QR·취소 UX 추가
-- [ ] 플랫폼에서 QR 승인 및 장치 등록
-- [ ] CarrotLink 전용 장치 key 생성·저장·폐기
-- [ ] 페어링/해제 최소 통합 검사
+- [-] Comma에서 단일 사용 페어링 세션 생성 — client/worker mock 검증 완료, 실장치 검증 대기
+- [-] 기존 Comma 설정 UI의 `PairingDialog`를 재사용해 CarrotLink QR·취소 UX 추가 — tici/mici 연결 완료, device render 검증 대기
+- [x] 플랫폼에서 QR 승인 및 장치 등록
+- [x] CarrotLink 전용 장치 key 생성·저장
+- [-] 페어링/해제 최소 통합 검사 — 로컬 claim 검증 완료, 실제 Comma E2E와 해제 UX 대기
 
 완료 조건:
 
@@ -101,4 +101,4 @@
 
 ## 현재 작업 경계
 
-**M1 조사와 계획까지 완료**했다. 다음 단계는 M2 플랫폼 pairing state부터 시작한다. 아직 기능 구현, 기존 대시보드 수정, Comma 배포는 하지 않았다.
+**M2 로컬 페어링 수직 슬라이스를 진행 중**이다. 플랫폼 pairing API와 `/pair` 승인 화면, Comma client와 tici/mici QR dialog 연결까지 구현했다. 다음 단계는 Linux/device UI build 검증과 공개 개발 환경의 실제 claim E2E다. 실제 Comma 배포는 사용자 승인 전까지 하지 않는다.

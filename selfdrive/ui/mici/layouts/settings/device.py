@@ -1,5 +1,6 @@
 import os
 import threading
+import time
 import pyray as rl
 from enum import IntEnum
 from collections.abc import Callable
@@ -7,9 +8,11 @@ from collections.abc import Callable
 from openpilot.common.basedir import BASEDIR
 from openpilot.common.params import Params
 from openpilot.common.time_helpers import system_time_valid
+from openpilot.selfdrive.carrot.carrotlink import carrotlink_state
 from openpilot.system.ui.widgets.scroller import NavRawScrollPanel, NavScroller
 from openpilot.selfdrive.ui.mici.widgets.button import BigButton, BigCircleButton
 from openpilot.selfdrive.ui.mici.widgets.dialog import BigDialog, BigConfirmationDialog
+from openpilot.selfdrive.ui.mici.widgets.carrotlink_pairing_dialog import CarrotLinkPairingDialog
 from openpilot.selfdrive.ui.mici.widgets.pairing_dialog import PairingDialog
 from openpilot.selfdrive.ui.mici.onroad.driver_camera_dialog import DriverCameraDialog
 from openpilot.selfdrive.ui.mici.layouts.onboarding import TrainingGuide, TermsPage
@@ -162,6 +165,33 @@ class PairBigButton(BigButton):
     else:
       dlg = PairingDialog()
     gui_app.push_widget(dlg)
+
+
+class CarrotLinkBigButton(BigButton):
+  def __init__(self):
+    self._carrotlink_state = carrotlink_state()
+    self._carrotlink_state_refresh = time.monotonic()
+    super().__init__("carrotlink", {"paired": "paired", "revoked": "revoked"}.get(self._carrotlink_state, "pair device"),
+                     gui_app.texture("icons_mici/settings/device/pair.png", 33, 60))
+    self.set_click_callback(self._show_pairing)
+
+  def _show_pairing(self):
+    if not system_time_valid():
+      gui_app.push_widget(BigDialog("", "Please connect to Wi-Fi to pair with CarrotLink."))
+      return
+    gui_app.push_widget(CarrotLinkPairingDialog(state_callback=self._on_carrotlink_state))
+
+  def _on_carrotlink_state(self, state: str):
+    self._carrotlink_state = state
+
+  def _update_state(self):
+    super()._update_state()
+    now = time.monotonic()
+    if now - self._carrotlink_state_refresh >= 1.0:
+      self._carrotlink_state = carrotlink_state()
+      self._carrotlink_state_refresh = now
+    self.set_value({"paired": "paired", "revoked": "revoked"}.get(self._carrotlink_state, "pair device"))
+    self.set_enabled(ui_state.is_offroad() and self._carrotlink_state not in ("paired", "revoked"))
 
 
 UPDATER_TIMEOUT = 10.0  # seconds to wait for updater to respond
@@ -341,6 +371,7 @@ class DeviceLayoutMici(NavScroller):
       DeviceInfoLayoutMici(),
       UpdateOpenpilotBigButton(),
       PairBigButton(),
+      CarrotLinkBigButton(),
       review_training_guide_btn,
       driver_cam_btn,
       terms_btn,
