@@ -146,6 +146,30 @@ class CarrotLinkClient:
       raise CarrotLinkError(f"CarrotLink request failed ({response.status_code})")
     return response
 
+  def _bootstrap_identity(self, serial: str) -> tuple[str, str, str]:
+    algorithm, private_key, public_key = get_key_pair()
+    if algorithm not in ("RS256", "ES256") or not private_key or not public_key:
+      raise CarrotLinkError("comma registration key is unavailable")
+    token = jwt.encode(
+      {"register": True, "exp": datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)}, private_key, algorithm=algorithm
+    )
+    try:
+      response = self.session.request(
+        "POST", self.api_host + "/v2/pilotauth/", timeout=15, allow_redirects=False,
+        json={"serial": serial, "public_key": public_key, "register_token": token},
+      )
+    except requests.RequestException as e:
+      raise CarrotLinkError("CarrotLink is unavailable") from e
+    if response.status_code != 200:
+      raise CarrotLinkError(f"CarrotLink bootstrap failed ({response.status_code})")
+    try:
+      identity = response.json()["dongle_id"]
+      if re.fullmatch(r"[0-9a-f]{16}", identity) is None:
+        raise ValueError
+    except (KeyError, TypeError, ValueError, requests.JSONDecodeError) as e:
+      raise CarrotLinkError("CarrotLink bootstrap response is invalid") from e
+    return identity, algorithm, private_key
+
   def register(self, dongle_id: str | None = None, serial: str | None = None) -> str:
     self._require_offroad()
     if self._read("state") == "revoked":
@@ -153,15 +177,17 @@ class CarrotLinkClient:
     if self._read("device_id") is not None:
       return self._device_id()
 
-    dongle_id = dongle_id or self.params.get("DongleId")
     serial = serial or HARDWARE.get_serial()
-    if not dongle_id or not serial:
+    if not serial:
       raise CarrotLinkError("comma registration is unavailable")
     private_key, public_key = self.ensure_key_pair()
     del private_key
-    algorithm, comma_private_key, _ = get_key_pair()
-    if algorithm not in ("RS256", "ES256") or not comma_private_key:
-      raise CarrotLinkError("comma registration key is unavailable")
+    if dongle_id is None:
+      dongle_id, algorithm, comma_private_key = self._bootstrap_identity(serial)
+    else:
+      algorithm, comma_private_key, _ = get_key_pair()
+      if algorithm not in ("RS256", "ES256") or not comma_private_key:
+        raise CarrotLinkError("comma registration key is unavailable")
 
     jti = self._persistent_uuid("registration_jti")
     token = self._token(dongle_id, "carrotlink-register", jti, comma_private_key, algorithm)

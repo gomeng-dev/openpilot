@@ -83,10 +83,11 @@ def test_pairing_client_contract(tmp_path, monkeypatch):
   assert module._carrotlink_root() == tmp_path / "carrotlink"
   monkeypatch.setattr(module, "PC", False)
   assert module._carrotlink_root() == Path("/data/carrotlink")
-  device_id, session_id = str(uuid.uuid4()), str(uuid.uuid4())
+  bootstrap_id, device_id, session_id = "a" * 16, str(uuid.uuid4()), str(uuid.uuid4())
   code = base64.urlsafe_b64encode(bytes(range(32))).rstrip(b"=").decode()
   session = FakeSession(
     [
+      FakeResponse(200, {"dongle_id": bootstrap_id}),
       FakeResponse(200, {"device_id": device_id}),
       FakeResponse(201, {"session_id": session_id, "pairing_url": f"https://dashboard.example/pair#{code}", "expires_at": "2030-01-01T00:00:00Z"}),
       FakeResponse(200, {"status": "pending"}),
@@ -120,17 +121,21 @@ def test_pairing_client_contract(tmp_path, monkeypatch):
   else:
     raise AssertionError("P-384 key was accepted")
 
-  register_claims = jwt.decode(session.calls[0][2]["headers"]["Authorization"].removeprefix("JWT "), options={"verify_signature": False})
-  assert register_claims["identity"] == "comma-id"
+  bootstrap_claims = jwt.decode(session.calls[0][2]["json"]["register_token"], options={"verify_signature": False})
+  assert bootstrap_claims["register"] is True
+  assert session.calls[0][1].endswith("/v2/pilotauth/")
+
+  register_claims = jwt.decode(session.calls[1][2]["headers"]["Authorization"].removeprefix("JWT "), options={"verify_signature": False})
+  assert register_claims["identity"] == bootstrap_id
   assert register_claims["purpose"] == "carrotlink-register"
   assert register_claims["jti"] == (key_dir / "registration_jti").read_text()
   assert 0 < register_claims["exp"] - register_claims["iat"] <= module.PAIRING_TTL
 
-  session_claims = jwt.decode(session.calls[1][2]["headers"]["Authorization"].removeprefix("JWT "), options={"verify_signature": False})
+  session_claims = jwt.decode(session.calls[2][2]["headers"]["Authorization"].removeprefix("JWT "), options={"verify_signature": False})
   assert session_claims["identity"] == device_id
   assert session_claims["purpose"] == "pairing-session"
   jwt.decode(
-    session.calls[1][2]["headers"]["Authorization"].removeprefix("JWT "),
+    session.calls[2][2]["headers"]["Authorization"].removeprefix("JWT "),
     (key_dir / "id_ecdsa.pub").read_text(),
     algorithms=["ES256"],
   )
@@ -171,7 +176,10 @@ def test_revoked_state_stops_network_and_offroad_gate(tmp_path, monkeypatch):
 def test_registration_retry_reuses_assertion(tmp_path, monkeypatch):
   module = load_module(tmp_path, monkeypatch)
   device_id = str(uuid.uuid4())
-  session = FakeSession([FakeResponse(500), FakeResponse(200, {"device_id": device_id})])
+  session = FakeSession([
+    FakeResponse(200, {"dongle_id": "a" * 16}), FakeResponse(500),
+    FakeResponse(200, {"dongle_id": "a" * 16}), FakeResponse(200, {"device_id": device_id}),
+  ])
   client = module.CarrotLinkClient("https://dashboard.example", tmp_path, FakeParams(), session)
 
   try:
@@ -182,7 +190,7 @@ def test_registration_retry_reuses_assertion(tmp_path, monkeypatch):
     raise AssertionError("failed registration succeeded")
   assert client.register(serial="SERIAL001") == device_id
 
-  claims = [jwt.decode(call[2]["headers"]["Authorization"].removeprefix("JWT "), options={"verify_signature": False}) for call in session.calls]
+  claims = [jwt.decode(call[2]["headers"]["Authorization"].removeprefix("JWT "), options={"verify_signature": False}) for call in session.calls[1::2]]
   assert claims[0]["jti"] == claims[1]["jti"]
 
 
