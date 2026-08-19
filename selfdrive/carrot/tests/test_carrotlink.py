@@ -1,5 +1,6 @@
 import base64
 import importlib.util
+import json
 import os
 import stat
 import sys
@@ -13,6 +14,7 @@ from pathlib import Path
 
 import jwt
 from Crypto.PublicKey import ECC, RSA
+from websocket import WebSocketTimeoutException
 
 
 @contextmanager
@@ -65,6 +67,9 @@ def load_module(tmp_path, monkeypatch):
     "openpilot.common.utils": types.SimpleNamespace(atomic_write=atomic_write),
     "openpilot.system.hardware": types.SimpleNamespace(HARDWARE=types.SimpleNamespace(get_serial=lambda: "SERIAL001"), PC=True),
     "openpilot.system.hardware.hw": types.SimpleNamespace(Paths=types.SimpleNamespace(persist_root=lambda: str(tmp_path))),
+    "openpilot.system.version": types.SimpleNamespace(get_build_metadata=lambda: types.SimpleNamespace(
+      channel="carrot", openpilot=types.SimpleNamespace(version="0.11.1")
+    )),
   }
   for name, module in modules.items():
     monkeypatch.setitem(sys.modules, name, module)
@@ -210,6 +215,118 @@ def test_gone_response_persists_revocation(tmp_path, monkeypatch):
     raise AssertionError("revoked pairing succeeded")
   assert client.pairing_status() == "revoked"
   assert len(session.calls) == 1
+
+
+class FakeWebSocket:
+  def __init__(self, message, exit_event):
+    self.message = message
+    self.exit_event = exit_event
+    self.sent = []
+    self.closed = False
+
+  def settimeout(self, _timeout):
+    pass
+
+  def recv(self):
+    self.exit_event.set()
+    return self.message
+
+  def send(self, message):
+    self.sent.append(message)
+
+  def close(self):
+    self.closed = True
+
+
+class TimeoutWebSocket(FakeWebSocket):
+  def __init__(self):
+    self.recv_count = 0
+    self.closed = False
+
+  def recv(self):
+    self.recv_count += 1
+    raise WebSocketTimeoutException()
+
+
+def paired_connection_client(module, tmp_path):
+  client = module.CarrotLinkClient("https://dashboard.example", tmp_path, FakeParams(), FakeSession([]))
+  client.ensure_key_pair()
+  client._write(client.root / "device_id", str(uuid.uuid4()))
+  client._write(client.root / "state", "paired")
+  return client
+
+
+def test_read_only_connection_reconnects_and_rejects_revoked(tmp_path, monkeypatch):
+  module = load_module(tmp_path, monkeypatch)
+  client = paired_connection_client(module, tmp_path)
+  event = threading.Event()
+  request = json.dumps({"jsonrpc": "2.0", "method": "getState", "id": 1})
+  sock = FakeWebSocket(request, event)
+  attempts = []
+  retry_delay = module._connection_retry_delay
+
+  def connector(url, **kwargs):
+    attempts.append((url, kwargs))
+    if len(attempts) == 1:
+      raise OSError("offline")
+    return sock
+
+  monkeypatch.setattr(module, "_connection_retry_delay", lambda _failures: 0)
+  module.run_connection(event, client, connector, lambda: {"version": "0.11.1", "branch": "carrot", "onroad": False})
+
+  assert len(attempts) == 2
+  assert attempts[-1][0] == "wss://dashboard.example/ws/carrotlink"
+  assert attempts[-1][1]["redirect_limit"] == 0
+  auth = attempts[-1][1]["header"][0].removeprefix("Authorization: JWT ")
+  claims = jwt.decode(auth, (client.root / "id_ecdsa.pub").read_text(), algorithms=["ES256"], audience="carrotlink-runtime")
+  assert claims["identity"] == client._read("device_id")
+  assert claims["sub"] == client._read("device_id")
+  assert claims["iss"] == "carrotlink-device"
+  assert claims["aud"] == "carrotlink-runtime"
+  assert claims["purpose"] == "carrotlink-connect"
+  assert json.loads(sock.sent[0]) == {"jsonrpc": "2.0", "result": {"version": "0.11.1", "branch": "carrot", "onroad": False}, "id": 1}
+  assert sock.closed
+
+  denied = json.loads(module.handle_connection_rpc(json.dumps({"jsonrpc": "2.0", "method": "setSetting", "id": 2}), dict))
+  assert denied["error"]["code"] == -32601
+  assert retry_delay(1, lambda _a, _b: 0) == 1
+  assert retry_delay(8, lambda _a, _b: 0) == module.CONNECTION_RETRY_MAX
+
+  timeout_event = threading.Event()
+  timeout_sock = TimeoutWebSocket()
+  timeout_attempts = 0
+
+  def timeout_connector(_url, **_kwargs):
+    nonlocal timeout_attempts
+    timeout_attempts += 1
+    if timeout_attempts == 1:
+      return timeout_sock
+    timeout_event.set()
+    raise OSError("still offline")
+
+  module.run_connection(timeout_event, paired_connection_client(module, tmp_path / "half-open"), timeout_connector, dict)
+  assert timeout_sock.recv_count == module.CONNECTION_IDLE_TIMEOUTS
+  assert timeout_sock.closed
+  assert timeout_attempts == 2
+
+  nested = "[" * 10_000 + "0" + "]" * 10_000
+  assert json.loads(module.handle_connection_rpc(nested, dict))["error"]["code"] == -32700
+
+  revoked = paired_connection_client(module, tmp_path / "revoked-connection")
+  revoked_event = threading.Event()
+  mark_revoked = revoked.mark_revoked
+
+  def persist_revoked():
+    mark_revoked()
+    revoked_event.set()
+
+  revoked.mark_revoked = persist_revoked
+
+  def reject(_url, **_kwargs):
+    raise module.WebSocketBadStatusException("gone", 410)
+
+  module.run_connection(revoked_event, revoked, reject, dict)
+  assert revoked.local_state() == "revoked"
 
 
 class FakePairingClient:

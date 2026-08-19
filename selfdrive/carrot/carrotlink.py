@@ -1,5 +1,7 @@
 import base64
+import json
 import os
+import random
 import re
 import threading
 import time
@@ -12,16 +14,20 @@ from urllib.parse import urlsplit
 import jwt
 import requests
 from Crypto.PublicKey import ECC
+from websocket import WebSocketBadStatusException, WebSocketException, WebSocketTimeoutException, create_connection
 
 from openpilot.common.api import get_key_pair
 from openpilot.common.params import Params
 from openpilot.common.utils import atomic_write
 from openpilot.system.hardware import HARDWARE, PC
 from openpilot.system.hardware.hw import Paths
+from openpilot.system.version import get_build_metadata
 
 
 PAIRING_TTL = 5 * 60
 DEFAULT_API_HOST = "https://commalink.gomeng-dev.com"
+CONNECTION_RETRY_MAX = 60.0
+CONNECTION_IDLE_TIMEOUTS = 12
 
 
 class CarrotLinkError(Exception):
@@ -118,17 +124,19 @@ class CarrotLinkClient:
       raise CarrotLinkError("CarrotLink device_id is invalid") from e
 
   @staticmethod
-  def _token(identity: str, purpose: str, jti: str, key: str, algorithm: str) -> str:
+  def _token(identity: str, purpose: str, jti: str, key: str, algorithm: str, extra_claims: dict | None = None) -> str:
     now = datetime.now(UTC)
+    claims = {
+      "identity": identity,
+      "purpose": purpose,
+      "jti": jti,
+      "iat": now,
+      "nbf": now,
+      "exp": now + timedelta(seconds=PAIRING_TTL),
+    }
+    claims.update(extra_claims or {})
     return jwt.encode(
-      {
-        "identity": identity,
-        "purpose": purpose,
-        "jti": jti,
-        "iat": now,
-        "nbf": now,
-        "exp": now + timedelta(seconds=PAIRING_TTL),
-      },
+      claims,
       key,
       algorithm=algorithm,
     )
@@ -203,6 +211,22 @@ class CarrotLinkClient:
   def _device_token(self, device_id: str, purpose: str) -> str:
     private_key, _ = self.ensure_key_pair()
     return self._token(device_id, purpose, str(uuid.uuid4()), private_key, "ES256")
+
+  def connection_url(self) -> str:
+    return self.api_host.replace("https://", "wss://", 1) + "/ws/carrotlink"
+
+  def connection_token(self) -> str:
+    if self.local_state() != "paired":
+      raise CarrotLinkError("CarrotLink is not paired")
+    device_id = self._device_id()
+    private_key, _ = self.ensure_key_pair()
+    return self._token(device_id, "carrotlink-connect", str(uuid.uuid4()), private_key, "ES256", {
+      "sub": device_id, "iss": "carrotlink-device", "aud": "carrotlink-runtime",
+    })
+
+  def mark_revoked(self):
+    self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    self._write(self.root / "state", "revoked", overwrite=True)
 
   def create_pairing_session(self, dongle_id: str | None = None, serial: str | None = None) -> dict:
     self._require_offroad()
@@ -282,6 +306,109 @@ def carrotlink_state(persist_root: str | Path | None = None) -> str:
   except OSError:
     return "unpaired"
   return state if state in ("pending", "paired", "revoked") else "unpaired"
+
+
+def _connection_state(params: Params, metadata) -> dict:
+  return {
+    "version": metadata.openpilot.version,
+    "branch": metadata.channel,
+    "onroad": not params.get_bool("IsOffroad"),
+  }
+
+
+def handle_connection_rpc(message: str, state_provider) -> str:
+  request_id = None
+  try:
+    request = json.loads(message)
+  except (TypeError, ValueError, RecursionError):
+    return json.dumps({"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}, "id": None}, separators=(",", ":"))
+  invalid = (
+    not isinstance(request, dict)
+    or request.get("jsonrpc") != "2.0"
+    or "id" not in request
+    or request["id"] is None
+    or not isinstance(request.get("method"), str)
+  )
+  if invalid:
+    request_id = request.get("id") if isinstance(request, dict) else None
+    return json.dumps(
+      {"jsonrpc": "2.0", "error": {"code": -32600, "message": "Invalid Request"}, "id": request_id}, separators=(",", ":")
+    )
+  request_id = request["id"]
+  if request["method"] != "getState":
+    return json.dumps({"jsonrpc": "2.0", "error": {"code": -32601, "message": "Method not found"}, "id": request_id}, separators=(",", ":"))
+  if request.get("params") not in (None, {}, []):
+    return json.dumps({"jsonrpc": "2.0", "error": {"code": -32602, "message": "Invalid params"}, "id": request_id}, separators=(",", ":"))
+  try:
+    state = state_provider()
+  except Exception:
+    return json.dumps({"jsonrpc": "2.0", "error": {"code": -32603, "message": "Internal error"}, "id": request_id}, separators=(",", ":"))
+  return json.dumps({"jsonrpc": "2.0", "result": state, "id": request_id}, separators=(",", ":"))
+
+
+def _connection_retry_delay(failures: int, jitter=random.uniform) -> float:
+  base = min(CONNECTION_RETRY_MAX, 2 ** min(max(0, failures - 1), 6))
+  return base + jitter(0.0, min(1.0, base / 4))
+
+
+def run_connection(exit_event: threading.Event | None = None, client: CarrotLinkClient | None = None, connector=create_connection, state_provider=None):
+  exit_event = exit_event or threading.Event()
+  client = client or CarrotLinkClient()
+  metadata = get_build_metadata()
+  state_provider = state_provider or (lambda: _connection_state(client.params, metadata))
+  failures = 0
+
+  while not exit_event.is_set():
+    state = client.local_state()
+    if state == "revoked":
+      exit_event.wait(60)
+      continue
+    if state != "paired":
+      exit_event.wait(5)
+      continue
+
+    sock = None
+    try:
+      token = client.connection_token()
+      sock = connector(
+        client.connection_url(), header=["Authorization: JWT " + token], timeout=15, enable_multithread=True, redirect_limit=0,
+      )
+      sock.settimeout(5)
+      idle_timeouts = 0
+      while not exit_event.is_set():
+        try:
+          message = sock.recv()
+        except WebSocketTimeoutException:
+          idle_timeouts += 1
+          if idle_timeouts >= CONNECTION_IDLE_TIMEOUTS:
+            break
+          continue
+        if message in (None, ""):
+          break
+        if not isinstance(message, str):
+          continue
+        sock.send(handle_connection_rpc(message, state_provider))
+        idle_timeouts = 0
+        failures = 0
+    except WebSocketBadStatusException as e:
+      if getattr(e, "status_code", None) == 410:
+        client.mark_revoked()
+        continue
+    except (CarrotLinkError, OSError, WebSocketException):
+      pass
+    finally:
+      if sock is not None:
+        try:
+          sock.close()
+        except WebSocketException:
+          pass
+
+    failures += 1
+    exit_event.wait(_connection_retry_delay(failures))
+
+
+def main():
+  run_connection()
 
 
 @dataclass(frozen=True)
